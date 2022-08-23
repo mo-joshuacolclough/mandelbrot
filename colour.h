@@ -18,6 +18,9 @@ public:
 
     template<typename T>
     static Colour from_hsv(T h, T s, T v);
+
+    template<typename T>
+    static Colour viridis(const T v);
 };
 
 

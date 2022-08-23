@@ -6,15 +6,17 @@
 #include <string>
 #include <chrono>
 #include <functional>
-#include <gmp.h>
+#include <iomanip>
+
+//#include <gmp.h>
+#include <mpi.h>
 
 #include "complex.h"
 #include "complex.cpp"
 #include "colour.h"
 #include "colour.cpp"
 
-#define CPU_NUM 42
-
+/*
 template<typename T>
 T julia_set(Complex<T> z, const Complex<T>& c, unsigned int max_iter)
 {
@@ -32,18 +34,17 @@ T julia_set(Complex<T> z, const Complex<T>& c, unsigned int max_iter)
 
     return (static_cast<T>(i) / static_cast<T>(max_iter));
 }
+*/
 
 template<typename T>
-inline void complex_square(Complex<T>& z)
-{
+inline void complex_square(Complex<T>& z) {
     T rtemp = z.r*z.r - z.i*z.i;
     z.i = 2 * z.r * z.i;
     z.r = rtemp;
 }
 
 template<typename T>
-T mandelbrot(Complex<T> in, const unsigned int max_iter, const unsigned int palette_lim, const T& log2)
-{
+T mandelbrot(Complex<T> in, const unsigned int max_iter, const unsigned int palette_lim, const T& log2) {
     // Returns a value between 0.0 and 1.0. This is a fraction of how 'deep' the number is in the set. 1.0 = max iter reached
     unsigned int i = 0;
 
@@ -73,6 +74,7 @@ T mandelbrot(Complex<T> in, const unsigned int max_iter, const unsigned int pale
     return depth;
 }
 
+/*
 template<typename T>
 T burning_ship(Complex<T> in, unsigned int max_iter)
 {
@@ -139,10 +141,10 @@ inline Complex<T> julia_scale(unsigned int px, unsigned int py, unsigned int wid
 
     return scaled;
 }
+*/
 
 template<typename T>
-Complex<T> mandelbrot_scale(unsigned int px, unsigned int py, unsigned int width, unsigned int height, T scale)
-{
+Complex<T> mandelbrot_scale(unsigned int px, unsigned int py, unsigned int width, unsigned int height, T scale) {
     Complex<T> scaled = Complex<T>( static_cast<T>(px), static_cast<T>(py) );
 
     scaled.r /= width;
@@ -154,8 +156,7 @@ Complex<T> mandelbrot_scale(unsigned int px, unsigned int py, unsigned int width
 }
 
 template<typename T>
-Complex<T> scale_with_focus_centred(unsigned int px, unsigned int py, unsigned int width, unsigned int height, const Complex<T>& focus, T scalex, T scaley)
-{
+Complex<T> scale_with_focus_centred(unsigned int px, unsigned int py, unsigned int width, unsigned int height, const Complex<T>& focus, T scalex, T scaley) {
     Complex<T> scaled = Complex<T>( static_cast<T>(px), static_cast<T>(py) );
 
     scaled.r /= width;
@@ -170,24 +171,35 @@ Complex<T> scale_with_focus_centred(unsigned int px, unsigned int py, unsigned i
 }
 
 template<typename T>
-inline void write_next_pixel_bw(std::ostream& imgfile, const T& depth)
-{
+inline void write_next_pixel_bw(std::ostream& imgfile, const T& depth) {
     Colour c = Colour::from_brightness(depth);
     imgfile << c.r << ' ' << c.g << ' ' << c.b << '\n';
 }
 
+template<typename T>
+inline void write_next_pixel_viridis(std::ostream& imgfile, const T& depth) {
+    Colour c = Colour::viridis(depth);
+    imgfile << c.r << ' ' << c.g << ' ' << c.b << '\n';
+}
+
+
 /*
 template<typename T>
-inline void write_depth(std::ostream& outfile, const T& depth)
+inline void write_depth(std::ostream& outfile, const T& depth, int precision)
 {
-    outfile << depth << std::endl;
+    outfile << std::fixed << std::setprecision(precision) << depth << std::endl;
 }
 */
 
+template<typename T>
+inline void write_depth(std::ostream& outfile, const T depth[], const unsigned int length) {
+    outfile.write(reinterpret_cast<const char*>(depth), std::streamsize(length * sizeof(T)));
+}
+
+
 
 template<typename ... Args>
-std::string string_format( const std::string& format, Args ... args ) // From stack overflow (but CC)
-{
+std::string string_format( const std::string& format, Args ... args ) {
     int size_s = std::snprintf( nullptr, 0, format.c_str(), args ... ) + 1; // Extra space for '\0'
 //    if( size_s <= 0 ){ throw std::runtime_error( "Error during formatting." ); }
     auto size = static_cast<size_t>( size_s );
@@ -197,113 +209,51 @@ std::string string_format( const std::string& format, Args ... args ) // From st
 }
 
 template<typename T>
-void runth(std::shared_ptr<bool> busyflag, const unsigned int index, const Complex<T> focus, T sc, const unsigned int img_width,
-           const unsigned int img_height, const unsigned int palette_lim, const unsigned int max_iter)
-{
-    *busyflag = true;
-
+void runframe(const unsigned int index, const Complex<T> focus,
+              T sc, const unsigned int img_width, const unsigned int img_height,
+              const unsigned int palette_lim, const unsigned int max_iter) {
     T log2 = std::log(static_cast<T>(2.0));
 
-    std::ofstream outfile(string_format("/scratch/jcolclou/frames/mandelbrot%d.ppm", index));
+//    std::ofstream outfile(string_format("/scratch/jcolclou/frames/mandelbrot%d.ppm", index));
 
-    // Writes PPM header regardless of if it is a txt or PPM file - contains useful information for both.
-    outfile << "P3\n" << img_width << ' ' << img_height << "\n255\n";
-
-    Complex<long double> z0;
-    Colour c;
-    long double depth;
+    Complex<T> z0;
+    const unsigned int total_pix = img_width * img_height;
+    T* depthbuffer = new T[total_pix]; // depth for every pixel
 
 
-
-    for (unsigned int py = 0; py < img_height; py++)
-    {
-//        std::cout << "Scanlines remaining: " << img_height-py << '\r' << std::flush;
-        for (unsigned int px = 0; px < img_width; px++)
-        {
+    #pragma omp parallel for collapse(2)
+    for (unsigned int py = 0; py < img_height; py++) {
+      for (unsigned int px = 0; px < img_width; px++) {
             z0 = scale_with_focus_centred<long double>(px, py, img_width, img_height, focus, sc/3.0, sc/2.0);
-            depth = mandelbrot<long double>(z0, max_iter, palette_lim, log2);
-            c = Colour::from_brightness<long double>(depth);
-            ppm_write_next_pixel(outfile, c);
+            depthbuffer[py * img_width + px] = mandelbrot<long double>(z0, max_iter, palette_lim, log2);
         }
     }
+
+    // WRITE BUFFER TO FILE
+    // --- txt --
+//    std::ofstream outfile(string_format("/scratch/jcolclou/frames/mandelbrot%d.txt", index), std::ios::binary | std::ios::out);
+
+
+    // --- ppm ---
+    std::ofstream outfile(string_format("/scratch/jcolclou/frames/mandelbrot%d.ppm", index), std::ios::binary | std::ios::out);
+
+    outfile << "P3\n" << img_width << ' ' << img_height << "\n255\n";
+
+    for (unsigned int p = 0; p < total_pix; p++)
+        write_next_pixel_viridis(outfile, depthbuffer[p]);
+
+    // --- txt ---
+    // write_depth(outfile, depthbuffer, total_pix);
 
     outfile.close();
 
-    std::cout << "THREAD " << index << " DONE." << std::endl;
-    *busyflag = false;
+    delete [] depthbuffer;
 }
 
-template<size_t N>
-struct MandThreadpool
-{
-    std::shared_ptr<bool> busy[N];
-    bool initialised[N];
-    std::thread workers[N];
 
-    MandThreadpool()
-    {
-        for (int i = 0; i < N; i++)
-        {
-            busy[i] = std::make_shared<bool>(false);
-            initialised[i] = false;
-        }
-    }
+int main(int argc, char ** argv) {
+    MPI_Init(&argc, &argv);
 
-    template<typename T>
-    void new_job(const unsigned int job_index, const Complex<T> focus, T sc, const unsigned int img_width,
-                 const unsigned int img_height, const unsigned int palette_lim, const unsigned int max_iter) // WARNING: Waits for free thread
-    {
-        std::cout << "THREAD STATUS" << std::endl;
-        std::cout << "\tB\t|\tI\t" << std::endl;
-        for (size_t th = 0; th < N; th++)
-        {
-            std::cout << '\t' << *busy[th] << "\t|\t" << initialised[th] << '\t' << std::endl;
-        }
-
-        bool found = false;
-        size_t thread_to_use = 0;
-        while (!found)
-        {
-            for (size_t th = 0; th < N; th++)
-            {
-                if (!*busy[th])
-                {
-                    std::cout << "Found thread: " << th << std::endl;
-                    thread_to_use = th;
-                    found = true;
-                    break;
-                }
-            }
-
-            if (!found)
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        }
-
-        // Make sure to join finished thread if needed
-        if (initialised[thread_to_use]) {
-            std::cout << "JOINING" << std::endl;
-            workers[thread_to_use].join();
-        }
-        else
-            initialised[thread_to_use] = true;
-
-        // Free thread is found :) , deploy the job
-        workers[thread_to_use] = std::thread(runth<T>, busy[thread_to_use], job_index, focus,
-                                             sc, img_width, img_height, palette_lim, max_iter);
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Allow some time for the busy flag to be set
-        std::cout << "Thread deployed on " << thread_to_use << "." << std::endl;
-    }
-
-    void wait_on_close() // joins all threads at the end
-    {
-        for (int i = 0; i < N; i++)
-            workers[i].join();
-    }
-};
-
-int main()
-{
     const unsigned int img_width = 1920;
     const unsigned int img_height = 1080;
 
@@ -314,26 +264,18 @@ int main()
         -0.641313061064803174860375015179302066579494952282305259556177543064448574172753690255637023068968116237074056553707214
     );
 
-    const unsigned int max_frames = CPU_NUM * 100;
-    unsigned int i = 0;
-    long double sc = 1.0;
-    long double max_iter;
-    long double palette_lim = 100;
+    const unsigned int max_frames = 10;
+    long double sc = 1e10;
+    long double palette_lim = 256;
 
-    MandThreadpool<CPU_NUM> thpool = MandThreadpool<CPU_NUM>();
 
-    while (i < max_frames)
-    {
-        max_iter = 50 + static_cast<unsigned int>(std::round(100 * std::sqrt(std::sqrt(sc))));
+    for (size_t i = 0; i < max_frames; ++i) {
+        long double max_iter = 50 + static_cast<unsigned int>(std::round(100 * std::sqrt(std::sqrt(sc))));
         std::cout << "MAX ITER: " << max_iter << std::endl;
 
-        thpool.new_job(i, focus, sc, img_width, img_height, static_cast<unsigned int>(std::round(palette_lim)), max_iter);
-        std::cout << "New job started. " << i << std::endl << std::endl;
-        i++;
-        sc *= 1.05;
+        runframe(i, focus, sc, img_width, img_height, static_cast<unsigned int>(std::round(palette_lim)), max_iter);
+        sc = sc * pow(1.01, i);
     }
-
-    thpool.wait_on_close();
 
     // ----------------------
 
@@ -371,5 +313,7 @@ int main()
     */
     // --------------------------------
 
+
+    MPI_Finalize();
     return 0;
 }
