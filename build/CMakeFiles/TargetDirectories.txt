@@ -1,3 +1,0 @@
-/data/users/jcolclou/cpp_projects/mandelbrot/build/CMakeFiles/rebuild_cache.dir
-/data/users/jcolclou/cpp_projects/mandelbrot/build/CMakeFiles/mandelbrot.dir
-/data/users/jcolclou/cpp_projects/mandelbrot/build/CMakeFiles/edit_cache.dir
