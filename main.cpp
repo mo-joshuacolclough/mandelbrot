@@ -264,17 +264,29 @@ int main(int argc, char ** argv) {
         -0.641313061064803174860375015179302066579494952282305259556177543064448574172753690255637023068968116237074056553707214
     );
 
-    const unsigned int max_frames = 10;
-    long double sc = 1e10;
+    const unsigned int max_frames = 124;
+    const long double sc0 = 1e10;
+    long double sc = sc0;
     long double palette_lim = 256;
+    long double max_iter;
 
+    // Split frames to different ranks
+    int world_size;
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    int my_rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
 
-    for (size_t i = 0; i < max_frames; ++i) {
-        long double max_iter = 50 + static_cast<unsigned int>(std::round(100 * std::sqrt(std::sqrt(sc))));
+    int frames_per_rank = max_frames / world_size;
+
+    int f0 = frames_per_rank * my_rank;
+    std::cout << "My frame offset: " << f0 << std::endl;
+
+    for (int i = f0; i < f0 + frames_per_rank; ++i) {
+        sc = sc0 * pow(1.01, i);
+        max_iter = 50 + static_cast<unsigned int>(std::round(100 * std::sqrt(std::sqrt(sc))));
         std::cout << "MAX ITER: " << max_iter << std::endl;
 
         runframe(i, focus, sc, img_width, img_height, static_cast<unsigned int>(std::round(palette_lim)), max_iter);
-        sc = sc * pow(1.01, i);
     }
 
     // ----------------------
