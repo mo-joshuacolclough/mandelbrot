@@ -264,7 +264,7 @@ int main(int argc, char ** argv) {
         -0.641313061064803174860375015179302066579494952282305259556177543064448574172753690255637023068968116237074056553707214
     );
 
-    const unsigned int max_frames = 124;
+    const unsigned int max_frames = 4;
     const long double sc0 = 1e10;
     long double sc = sc0;
     long double palette_lim = 256;
