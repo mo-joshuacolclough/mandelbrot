@@ -4,17 +4,19 @@
 #include <algorithm>
 #include <thread>
 #include <string>
+#include <cstring>
 #include <chrono>
 #include <functional>
 #include <iomanip>
 
-//#include <gmp.h>
 #include <mpi.h>
 
 #include "complex.h"
 #include "complex.cpp"
 #include "colour.h"
 #include "colour.cpp"
+
+#define MPIBaseType MPI::LONG_DOUBLE
 
 using BaseType = long double;
 
@@ -24,7 +26,7 @@ inline void complex_square(Complex<BaseType>& z) {
   z.r = temp;
 }
 
-BaseType mandelbrot(Complex<BaseType> in, const unsigned int max_iter, const unsigned int palette_lim, const BaseType& log2) {
+BaseType mandelbrot(const Complex<BaseType> in, const unsigned int max_iter, const unsigned int palette_lim, const BaseType& log2) {
   // Returns a value between 0.0 and 1.0. This is a fraction of how 'deep' the number is in the set. 1.0 = max iter reached
   unsigned int i = 0;
 
@@ -106,7 +108,8 @@ std::string string_format( const std::string& format, Args ... args ) {
   return std::string( buf.get(), buf.get() + size - 1 ); // We don't want the '\0' inside
 }
 
-void runframe(const unsigned int index, const Complex<BaseType> focus,
+void runframe(const int my_rank, const int world_size,
+              const unsigned int index, const Complex<BaseType> focus,
               BaseType sc, const unsigned int img_width, const unsigned int img_height,
               const unsigned int palette_lim, const unsigned int max_iter) {
   const BaseType log2 = std::log(2.0);
@@ -114,17 +117,49 @@ void runframe(const unsigned int index, const Complex<BaseType> focus,
   //    std::ofstream outfile(string_format("/scratch/jcolclou/frames/mandelbrot%d.ppm", index));
 
   Complex<BaseType> z0;
-  const unsigned int total_pix = img_width * img_height;
-  BaseType* depthbuffer = new BaseType[total_pix]; // depth for every pixel
 
+  // Partition vertically
+  const unsigned int partition_height = img_height/world_size;
+  const unsigned int my_py_offset = partition_height * my_rank;
+  const unsigned int partition_size = partition_height * img_width;
 
-#pragma omp parallel for collapse(2)
-  for (unsigned int py = 0; py < img_height; py++) {
+  BaseType* depthbuffer = new BaseType[partition_size];  // depth for every pixel on rank
+
+  std::cout << "[" << my_rank << "] py offset = " << my_py_offset << std::endl;
+
+// #pragma omp parallel for collapse(2)
+  for (unsigned int py = 0; py < partition_height; py++) {
     for (unsigned int px = 0; px < img_width; px++) {
-      z0 = scale_with_focus_centred(px, py, img_width, img_height, focus, sc/3.0, sc/2.0);
+      z0 = scale_with_focus_centred(px, py + my_py_offset, img_width, img_height, focus, sc/3.0, sc/2.0);
       depthbuffer[py * img_width + px] = mandelbrot(z0, max_iter, palette_lim, log2);
     }
   }
+
+  std::cout << "[" << my_rank << "] Done generating." << std::endl;
+
+  // Combine result from all MPI ranks
+
+  std::cout << "[" << my_rank << "] Calling gather..." << std::endl;
+
+  BaseType* recv_buffer = nullptr;
+  if (my_rank == 0) {
+    recv_buffer = new BaseType[img_width * img_height];
+  }
+
+  const int err = MPI_Gather(depthbuffer,
+                             partition_size,
+                             MPIBaseType,
+                             recv_buffer,
+                             partition_size,
+                             MPIBaseType,
+                             0,
+                             MPI_COMM_WORLD);
+
+  if (err != 0) {
+    std::cerr << "[" << my_rank << "] MPI ERROR..." << std::endl;
+  }
+
+  std::cout << "[" << my_rank << "] Gather finished." << std::endl;
 
   // WRITE BUFFER TO FILE
   // --- txt --
@@ -132,18 +167,20 @@ void runframe(const unsigned int index, const Complex<BaseType> focus,
 
 
   // --- ppm ---
-  std::ofstream outfile(string_format("/scratch/jcolclou/frames/mandelbrot%d.ppm", index), std::ios::binary | std::ios::out);
+  if (my_rank == 0) {
+    std::ofstream outfile(string_format("/scratch/jcolclou/frames/mandelbrot%d.ppm", index), std::ios::binary | std::ios::out);
 
-  outfile << "P3\n" << img_width << ' ' << img_height << "\n255\n";
+    outfile << "P3\n" << img_width << ' ' << img_height << "\n255\n";
 
-  for (unsigned int p = 0; p < total_pix; p++) {
-    write_next_pixel_viridis(outfile, depthbuffer[p]);
-  }
+    for (unsigned int p = 0; p < img_width * img_height; p++) {
+      write_next_pixel_viridis(outfile, recv_buffer[p]);
+    }
 
   // --- txt ---
   // write_depth(outfile, depthbuffer, total_pix);
 
-  outfile.close();
+    outfile.close();
+  }
 
   delete [] depthbuffer;
 }
@@ -152,8 +189,8 @@ void runframe(const unsigned int index, const Complex<BaseType> focus,
 int main(int argc, char ** argv) {
   MPI_Init(&argc, &argv);
 
-  const unsigned int img_width = 1920;
-  const unsigned int img_height = 1080;
+  const unsigned int img_width = 1280; // 1920;
+  const unsigned int img_height = 720; // 1080;
 
   /* --- Zoom ---
     */
@@ -162,67 +199,28 @@ int main(int argc, char ** argv) {
     -0.641313061064803174860375015179302066579494952282305259556177543064448574172753690255637023068968116237074056553707214
   );
 
-  const unsigned int max_frames = 4;
-  const BaseType sc0 = 1e10;
-  BaseType sc = sc0;
-  BaseType palette_lim = 256;
-  BaseType max_iter;
-
   // Split frames to different ranks
   int world_size;
   MPI_Comm_size(MPI_COMM_WORLD, &world_size);
   int my_rank;
   MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
 
-  int frames_per_rank = max_frames / world_size;
+  const unsigned int max_frames = 4;
+  const BaseType sc0 = 1e10;
+  BaseType sc = sc0;
+  BaseType palette_lim = 256;
+  BaseType max_iter;
 
-  int f0 = frames_per_rank * my_rank;
-  std::cout << "My frame offset: " << f0 << std::endl;
+  std::cout << "My rank: " << my_rank << std::endl;
+  std::cout << "World size: " << world_size << std::endl;
 
-  for (int i = f0; i < f0 + frames_per_rank; ++i) {
+  for (int i = 0; i < max_frames; ++i) {
     sc = sc0 * pow(1.01, i);
     max_iter = 50 + static_cast<unsigned int>(std::round(100 * std::sqrt(std::sqrt(sc))));
     std::cout << "MAX ITER: " << max_iter << std::endl;
 
-    runframe(i, focus, sc, img_width, img_height, static_cast<unsigned int>(std::round(palette_lim)), max_iter);
+    runframe(my_rank, world_size, i, focus, sc, img_width, img_height, static_cast<unsigned int>(std::round(palette_lim)), max_iter);
   }
-
-  // ----------------------
-
-  // --- Single image ---
-  /*
-    std::ofstream imgfile("/scratch/jcolclou/test_fractal.ppm");
-
-    const unsigned int max_iter = 100;
-    const unsigned int palette_lim = 50;
-    Complex<BaseType> focus = Complex<BaseType>(0.0, 0.0);
-    const BaseType sc = 1.0;
-
-    imgfile << "P3\n" << img_width << ' ' << img_height << "\n255\n";
-
-    Complex<BaseType> z0;
-    Colour c;
-
-    for (unsigned int py = 0; py < img_height; py++)
-    {
-//        std::cout << "Scanlines remaining: " << img_height-py << '\r' << std::flush;
-        for (unsigned int px = 0; px < img_width; px++)
-        {
-            z0 = scale_with_focus_centred(px, py, img_width, img_height, focus, sc/3.0, sc/2.0);
-            BaseType depth = testfunc(z0, max_iter, palette_lim);
-            if (depth < 0.001)
-                c = BLACK;
-            else
-                c = Colour::from_hsv<BaseType>(depth, 0.9, 1.0);
-
-            ppm_write_next_pixel(imgfile, c);
-        }
-    }
-
-    imgfile.close();
-    */
-  // --------------------------------
-
 
   MPI_Finalize();
   return 0;
